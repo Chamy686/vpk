@@ -1,0 +1,395 @@
+               
+
+#if UI
+global function IsTwoFactorAuthenticationEnabled
+global function IsPlayerLeveledForGifting
+global function IsPlayerWithinGifingLimit
+global function CanLocalPlayerGift
+global function RefreshTwoFactorAuthenticationStatus
+global function RefreshTwoFactorAuthenticationAndIsEnabled
+global function Gifting_GetRemainingDailyGifts
+global function GetGiftOfferEligibility
+global function IsGiftingEnabled
+global function HasFriendshipTenureBeenLongEnough
+global function GetGiftingMaxLimitPerResetPeriod
+global function CacheGiftingInboxInfos
+global function GetCachedGiftingInboxInfos
+global function GetGiftingInboxMessages
+global function ClearCachedGiftingInboxInfos
+global function Gifting_LevelInit
+global function MarkNewGiftedItemsAsNew
+global function GetFriendNameFromNucleusPId
+global function RemoveGiftCacheMessage
+#if DEV
+global function DEV_PrintCachedGiftingInboxInfos
+#endif           
+#endif
+
+global struct GRXScriptInboxMessage
+{
+	array<int> itemIndex
+	array<int> itemCount
+	bool       isNew
+	int        timestamp
+	string     senderNucleusPid
+	string     gifterName
+}
+#if UI
+struct{
+	array<GRXGiftingInboxInfo> cachedGiftingInboxInfos
+	array<GRXScriptInboxMessage> inboxMessages
+} file
+#endif
+
+#if UI
+bool function IsTwoFactorAuthenticationEnabled()
+{
+	bool isTfaEnabled = EADP_IsTfaEnabled()
+	
+	if ( GetConVarBool( "mtx_giftingForce2FA" ) )
+		isTfaEnabled = true
+
+	return isTfaEnabled
+}
+#endif          
+
+#if UI
+bool function IsPlayerLeveledForGifting()
+{
+	entity localPlayer = GetLocalClientPlayer()
+	if ( !IsValid( localPlayer ) )
+		return false
+
+	int currentXP = GetPlayerAccountXPProgress( ToEHI( localPlayer ) )
+
+	int currentLevel = GetAccountLevelForXP( currentXP )
+
+	                                                     
+	if ( currentLevel < ( GetConVarInt( "mtx_giftingMinAccountLevel" ) - 1 ) )
+		return false
+
+	return true
+}
+#endif          
+
+#if UI
+bool function IsPlayerWithinGifingLimit()
+{
+	int limitCounter = GRX_GetGiftingLimitCounter()
+	if  ( limitCounter <  GetGiftingMaxLimitPerResetPeriod() )
+		return true
+
+	return false
+}
+#endif          
+
+#if UI
+void function RefreshTwoFactorAuthenticationStatus()
+{
+	RefreshEaTwoFactorAuthenticationStatus()
+}
+#endif          
+
+#if UI
+bool function CanLocalPlayerGift()
+{
+	bool hasTfa = IsTwoFactorAuthenticationEnabled()
+	bool hasLevel = IsPlayerLeveledForGifting()
+	bool withinLimits = IsPlayerWithinGifingLimit()
+
+	return hasTfa && hasLevel && withinLimits
+}
+#endif          
+
+#if UI
+bool function RefreshTwoFactorAuthenticationAndIsEnabled()
+{
+	RefreshEaTwoFactorAuthenticationStatus()
+
+	bool isTfaEnabled = EADP_IsTfaEnabled()
+	return isTfaEnabled
+}
+#endif          
+
+#if UI
+int function Gifting_GetRemainingDailyGifts()
+{
+	return GetGiftingMaxLimitPerResetPeriod() - GRX_GetGiftingLimitCounter()
+}
+#endif          
+
+#if UI
+void function GetGiftOfferEligibility( string offerAlias, int hardwareId, string nucleus_pid )
+{
+	if ( !IsGiftingEnabled() )
+		return
+
+	GRX_GetOffer( offerAlias, hardwareId, nucleus_pid )
+}
+#endif          
+
+#if UI
+bool function IsGiftingEnabled()
+{
+	return GetConVarBool( "mtx_giftingEnabled" )
+}
+#endif          
+
+#if UI
+bool function HasFriendshipTenureBeenLongEnough( int friendshipCreationTime )
+{
+	if ( !IsConnected() )
+		return false
+
+	int currentTime = GetUnixTimestamp()
+	int friendshipLengthInSeconds = currentTime - friendshipCreationTime
+
+	                                         
+	int friendshipLengthInDays = friendshipLengthInSeconds / (  60 * 60 * 24 )
+	int minFriendshipInDays = GetConVarInt( "mtx_giftingMinFriendshipInDays" )
+
+	return friendshipLengthInDays >= minFriendshipInDays
+}
+#endif          
+
+#if UI
+int function GetGiftingMaxLimitPerResetPeriod()
+{
+	return GetConVarInt( "mtx_giftingLimit" )
+}
+#endif          
+
+#if UI
+void function CacheGiftingInboxInfos( int batchCounter, int totalNumBatches, array<GRXGiftingInboxInfo> inboxInfos )
+{
+	if ( batchCounter == 1 )
+	{
+		file.cachedGiftingInboxInfos.clear()
+		file.inboxMessages.clear()
+
+		                                           
+		if ( inboxInfos.len() == 0 )
+			return
+	}
+	file.cachedGiftingInboxInfos.extend( inboxInfos )
+
+	if ( batchCounter == totalNumBatches )
+	{
+		EadpPeopleList eadFriendlist = EADP_GetFriendsListWithOffline()
+		file.cachedGiftingInboxInfos.sort( SortByOldest )
+		GRXGiftingInboxInfo prevInfo = file.cachedGiftingInboxInfos[0]
+
+		array<int> itemsPerGift
+		int itemsCounter = 0
+
+		for ( int i = 0; i < file.cachedGiftingInboxInfos.len(); i++ )
+		{
+			GRXGiftingInboxInfo info = file.cachedGiftingInboxInfos[i]
+
+			if ( info.senderNucleusPid == prevInfo.senderNucleusPid && info.timestamp == prevInfo.timestamp )
+			{
+				itemsCounter++
+			}
+			else
+			{
+				itemsPerGift.append( itemsCounter )
+				itemsCounter = 1
+			}
+
+			if ( i == file.cachedGiftingInboxInfos.len() - 1 )
+			{
+				itemsPerGift.append( itemsCounter )
+			}
+			prevInfo = info
+		}
+
+		int checkedGifts = 0
+		for ( int i = 0; i < itemsPerGift.len(); i++ )
+		{
+			GRXScriptInboxMessage message
+			GRXGiftingInboxInfo info = file.cachedGiftingInboxInfos[checkedGifts]
+			message.senderNucleusPid = info.senderNucleusPid
+			message.gifterName = GetFriendNameFromNucleusPId( info.senderNucleusPid, eadFriendlist.people )
+			message.timestamp = info.timestamp
+			message.isNew = true
+
+			int remainingIndex = file.cachedGiftingInboxInfos.len() - (file.cachedGiftingInboxInfos.len() - (checkedGifts + itemsPerGift[i]))
+			for ( int z = checkedGifts; z < remainingIndex; z++ )
+			{
+				GRXGiftingInboxInfo newInfo = file.cachedGiftingInboxInfos[z]
+				message.itemCount.append( newInfo.itemCount )
+				message.itemIndex.append( newInfo.itemIndex )
+			}
+			file.inboxMessages.append( message )
+			checkedGifts += itemsPerGift[i];
+		}
+	}
+}
+
+int function SortByOldest( GRXGiftingInboxInfo a, GRXGiftingInboxInfo b )
+{
+	if ( a.timestamp < b.timestamp )
+		return 1
+
+	if ( a.timestamp > b.timestamp )
+		return -1
+
+	return 0
+}
+#endif          
+
+#if UI
+void function RemoveGiftCacheMessage( int timestamp, string nID )
+{
+	for ( int i = 0; i < file.inboxMessages.len(); i++ )
+	{
+		GRXScriptInboxMessage message = file.inboxMessages[i]
+
+		if ( message.senderNucleusPid == nID && message.timestamp == timestamp )
+		{
+			file.inboxMessages.remove( i )
+			return
+		}
+	}
+}
+#endif
+
+
+#if UI
+array<GRXScriptInboxMessage> function GetGiftingInboxMessages()
+{
+	return file.inboxMessages
+}
+#endif
+
+#if UI
+array<GRXGiftingInboxInfo> function GetCachedGiftingInboxInfos()
+{
+	return file.cachedGiftingInboxInfos
+}
+#endif          
+
+#if UI
+void function ClearCachedGiftingInboxInfos()
+{
+	file.cachedGiftingInboxInfos.clear()
+}
+#endif         
+
+#if UI
+void function Gifting_LevelInit()
+{
+	MarkNewGiftedItemsAsNew()
+}
+#endif          
+
+#if UI
+void function MarkNewGiftedItemsAsNew()
+{
+	if ( !IsLobby() )
+		return
+
+	foreach ( GRXGiftingInboxInfo inboxInfo in file.cachedGiftingInboxInfos )
+	{
+		if ( inboxInfo.isNew )
+		{
+			ItemFlavor itemFlav = GetItemFlavorByGRXIndex( inboxInfo.itemIndex )
+			Newness_TEMP_MarkItemAsNewAndInformServer( itemFlav )
+		}
+	}
+}
+#endif          
+
+#if DEV && UI
+void function DEV_PrintCachedGiftingInboxInfos()
+{
+	printt("Printing gifting inbox info ---------------")
+	for ( int idx = 0; idx < file.cachedGiftingInboxInfos.len(); ++idx )
+	{
+		printt( "Gift #" + ( idx + 1 ) )
+		printt( "\titemIndex = " + file.cachedGiftingInboxInfos[idx].itemIndex )
+		printt( "\titemCount = " + file.cachedGiftingInboxInfos[idx].itemCount )
+		printt( "\tisNew = " + file.cachedGiftingInboxInfos[idx].isNew )
+		printt( "\ttimestamp = " + file.cachedGiftingInboxInfos[idx].timestamp )
+		printt( "\tsenderNucleusPid = " + file.cachedGiftingInboxInfos[idx].senderNucleusPid )
+	}
+	printt("End of gifts ---------------")
+}
+#endif                 
+#if UI
+string function GetFriendNameFromNucleusPId( string id, array<EadpPeopleData> friends )
+{
+	string name = Localize( "#UNKNOWN_USER" )
+	EadpPeopleData friend
+	int platform = -1
+	foreach ( EadpPeopleData person in friends )
+	{
+		array< string > ids = [person.ea_pid, person.xbox_pid, person.psn_pid, person.switch_pid, person.steam_pid]
+		for ( int i = 0; i < ids.len(); i++ )
+		{
+			if ( id == ids[i] )
+			{
+				friend = person
+				switch ( i )
+				{
+					case 0:
+						platform = HARDWARE_PC
+						break
+					case 1:
+						platform = HARDWARE_XBOXONE
+						break
+					case 2:
+						platform = HARDWARE_PS4
+						break
+					case 3:
+						platform = HARDWARE_SWITCH
+						break
+					case 4:
+						platform = HARDWARE_PC_STEAM
+						break
+				}
+			}
+		}
+		if ( platform != -1 )
+			break
+	}
+
+	foreach ( EadpPresenceData presence in friend.presences )
+	{
+		bool isPSN = platform == HARDWARE_PS4
+		bool isXboxLive = platform == HARDWARE_XBOXONE
+		if ( isPSN )
+		{
+			if ( presence.hardware == HARDWARE_PS4 || presence.hardware == HARDWARE_PS5 )
+			{
+				name = presence.name
+				return name
+			}
+		}
+		else if ( isXboxLive )
+		{
+			if ( presence.hardware == HARDWARE_XBOXONE || presence.hardware == HARDWARE_XB5 )
+			{
+				name = presence.name
+				return name
+			}
+		}
+
+		if ( presence.hardware == platform )
+		{
+			name = presence.name
+			return name
+		}
+	}
+
+	return name
+}
+#endif          
+
+                     
+
+
+
+
+
+
